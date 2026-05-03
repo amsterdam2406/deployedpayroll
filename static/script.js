@@ -40,9 +40,12 @@ const AppState = {
     loginAttempts: 0,
     loginLockedUntil: null,
     selectedEmployeesForBulk: new Set(),
-    bankList: [], // ADDED: Store Nigerian banks
+    bankList: [],
     lastVerifiedAccountKey: null,
     pendingAccountVerificationKey: null,
+    paymentPollInterval: null,
+    paymentPollInterval: null,
+    bulkPollInterval: null,
     
     elements: {
         tbody: null,
@@ -230,6 +233,19 @@ function closeModal(id) {
         AppState.cameraStream.getTracks().forEach(track => track.stop());
         AppState.cameraStream = null;
     }
+    
+    // Stop payment polling when closing payment modals
+    if (id === 'individualPaymentModal' || id === 'bulkPaymentModal') {
+        if (AppState.paymentPollInterval) {
+            clearInterval(AppState.paymentPollInterval);
+            AppState.paymentPollInterval = null;
+        }
+        if (AppState.bulkPollInterval) {
+            clearInterval(AppState.bulkPollInterval);
+            AppState.bulkPollInterval = null;
+        }
+    }
+    
     const modal = document.getElementById(id);
     if (modal) modal.classList.remove('active');
 }
@@ -1905,7 +1921,6 @@ async function loadPaymentHistory() {
     }
 }
 
-// FIXED: Process bulk payment with proper totals
 async function processBulkPayment() {
     const checked = Array.from(
         document.querySelectorAll('#bulkPaymentModal tbody input[type=checkbox]:checked')
@@ -1916,7 +1931,6 @@ async function processBulkPayment() {
         return;
     }
 
-    // Enforce max 50 per batch
     if (checked.length > 50) {
         showToast('Maximum 50 employees per batch. Please select fewer.', 'error');
         return;
@@ -1927,7 +1941,6 @@ async function processBulkPayment() {
     try {
         showLoading(btn);
         
-        // Single API call - backend handles all employees
         const res = await apiRequest('/api/payments/bulk_payment/', {
             method: 'POST',
             body: { employee_ids: checked }
@@ -1937,40 +1950,27 @@ async function processBulkPayment() {
             throw new Error(res.message || 'Bulk payment failed');
         }
 
-        // Show summary modal instead of opening tabs
         const results = res.data || {};
-        const successCount = (results.payments || []).length;
-        const errorCount = (results.errors || []).length;
-        
-        let message = `Processed ${successCount}/${checked.length} payments.`;
-        if (errorCount > 0) {
-            message += ` ${errorCount} errors.`;
-            const errorPreview = (results.errors || []).slice(0, 3).join('; ');
-            if (errorPreview) message += ` ${errorPreview}`;
-        }
-        
-        showToast(message, successCount > 0 ? 'success' : 'error');
-        
-        // If there are authorization URLs, show them in a summary list
         const payments = results.payments || [];
+        const errors = results.errors || [];
+        
+        // Show initial summary
+        let message = `Initiated ${payments.length}/${checked.length} transfers.`;
+        if (errors.length > 0) {
+            message += ` ${errors.length} errors.`;
+        }
+        showToast(message, payments.length > 0 ? 'success' : 'error');
+        
+        // Close modal and refresh tables
+        closeModal('bulkPaymentModal');
+        await loadPaymentHistory();
+        populatePaymentsTable();
+        
+        // START BULK POLLING for all successful initiations
         if (payments.length > 0) {
-            // Create a summary display
-            const summaryHtml = payments.map(p => `
-                <div style="padding: 8px; border-bottom: 1px solid #eee;">
-                    <strong>${p.employee_name}</strong>: ${formatCurrency(p.net_salary)}
-                    ${p.authorization_url ? `<a href="${p.authorization_url}" target="_blank" style="color: #117e62; margin-left: 10px;">[Pay]</a>` : ''}
-                </div>
-            `).join('');
-            
-            // You can display this in a modal or console
-            console.log('Payment links:', payments.map(p => ({name: p.employee_name, url: p.authorization_url})));
+            startBulkPaymentPolling(payments);
         }
         
-        await loadPaymentHistory();
-        await loadEmployees();
-        updateDashboardStats();
-        
-        closeModal('bulkPaymentModal');
     } catch (err) {
         console.error('Bulk payment error:', err);
         showToast(err.message || 'Bulk payment failed', 'error');
@@ -1979,6 +1979,110 @@ async function processBulkPayment() {
     }
 }
 
+function startBulkPaymentPolling(payments, maxAttempts = 40, interval = 3000) {
+    // payments = [{reference, employee_name, employee_id, net_salary, bank}, ...]
+    
+    const pendingRefs = new Map(); // reference -> {employee_name, status}
+    const completedRefs = new Set();
+    const failedRefs = new Set();
+    
+    payments.forEach(p => {
+        pendingRefs.set(p.reference, {
+            employee_name: p.employee_name,
+            employee_id: p.employee_id,
+            net_salary: p.net_salary,
+            status: 'processing'
+        });
+    });
+    
+    let attempts = 0;
+    
+    // Clear any existing bulk poll
+    if (AppState.bulkPollInterval) {
+        clearInterval(AppState.bulkPollInterval);
+    }
+    
+    // Show progress toast initially
+    showToast(`Checking status for ${pendingRefs.size} payments...`, 'info');
+    
+    const pollAll = async () => {
+        attempts++;
+        
+        // Poll all pending references in parallel
+        const pollPromises = Array.from(pendingRefs.keys()).map(async (reference) => {
+            try {
+                const res = await apiRequest(`/api/payments/verify-payment/${reference}/`);
+                
+                if (!res.success) return { reference, status: null };
+                
+                const paymentStatus = res.data.payment_status;
+                const paymentInfo = pendingRefs.get(reference);
+                
+                if (paymentStatus === 'completed') {
+                    completedRefs.add(reference);
+                    pendingRefs.delete(reference);
+                    showToast(`Paid: ${paymentInfo.employee_name} — ₦${paymentInfo.net_salary?.toLocaleString?.() || paymentInfo.net_salary}`, 'success', 3000);
+                    
+                } else if (paymentStatus === 'failed') {
+                    failedRefs.add(reference);
+                    pendingRefs.delete(reference);
+                    showToast(`Failed: ${paymentInfo.employee_name}`, 'error', 3000);
+                }
+                
+                return { reference, status: paymentStatus };
+                
+            } catch (err) {
+                console.error(`Poll error for ${reference}:`, err);
+                return { reference, status: null };
+            }
+        });
+        
+        await Promise.all(pollPromises);
+        
+        // Calculate progress
+        const total = payments.length;
+        const completed = completedRefs.size;
+        const failed = failedRefs.size;
+        const remaining = pendingRefs.size;
+        
+        // Show progress toast every 3 attempts (every ~9 seconds)
+        if (attempts % 3 === 0 && remaining > 0) {
+            showToast(`Progress: ${completed} paid, ${failed} failed, ${remaining} pending...`, 'info', 2000);
+        }
+        
+        // Refresh tables to show updated statuses
+        if (completedRefs.size > 0 || failedRefs.size > 0) {
+            await loadPaymentHistory();
+            populatePaymentsTable();
+            updateDashboardStats();
+        }
+        
+        // Check if all done
+        if (pendingRefs.size === 0) {
+            clearInterval(AppState.bulkPollInterval);
+            AppState.bulkPollInterval = null;
+            
+            const finalMsg = `Bulk payment complete! ${completed} successful, ${failed} failed.`;
+            showToast(finalMsg, failed > 0 ? 'warning' : 'success', 8000);
+            
+            // Final refresh
+            await loadPaymentHistory();
+            populatePaymentsTable();
+            updateDashboardStats();
+            
+        } else if (attempts >= maxAttempts) {
+            clearInterval(AppState.bulkPollInterval);
+            AppState.bulkPollInterval = null;
+            
+            const remainingNames = Array.from(pendingRefs.values()).map(p => p.employee_name).join(', ');
+            showToast(`Timeout: ${pendingRefs.size} payments still pending. Refresh later to check.`, 'warning', 10000);
+        }
+    };
+    pollAll();
+    AppState.bulkPollInterval = setInterval(pollAll, interval);
+}
+
+// REPLACE your current initiateIndividualPayment function with this:
 async function initiateIndividualPayment(empId) {
     try {
         const res = await apiRequest('/api/payments/initiate_payment/', {
@@ -1986,23 +2090,95 @@ async function initiateIndividualPayment(empId) {
             body: { employee_id: empId }
         });
 
-        if (res.success && res.data.authorization_url) {
+        if (!res.success) {
+            throw new Error(res.message || 'Failed to initiate payment');
+        }
+
+        // Store the reference for polling
+        const reference = res.data.reference;
+        AppState.currentPaymentReference = reference;
+
+        if (res.data.authorization_url) {
+            // Open Paystack payment page
             window.open(res.data.authorization_url, '_blank');
             showToast('Payment initiated. Complete in the new window.', 'info');
-        } else if (res.success && res.data.reference) {
-            showToast(res.data.message || 'Salary transfer initiated successfully', 'success');
+            
+            // START POLLING for status update
+            startPaymentStatusPolling(reference);
+            
+        } else if (res.data.otp_sent) {
+            showOTPModal();
+        } else {
+            showToast(res.data.message || 'Payment initiated', 'success');
             await loadPaymentHistory();
             updateDashboardStats();
-        } else if (res.success && res.data.otp_sent) {
-            AppState.currentPaymentReference = res.data.reference;
-            showOTPModal();
-        } else if (!res.success) {
-            throw new Error(res.message || 'Failed to initiate payment');
-        } else {
-            throw new Error(res.data?.error || 'Unexpected payment response');
         }
     } catch (err) {
         showToast(err.message || 'Failed to initiate payment', 'error');
+    }
+}
+
+// ADD this new function for polling:
+
+function startPaymentStatusPolling(reference, maxAttempts = 30, interval = 3000) {
+    let attempts = 0;
+    
+    showToast('Checking payment status...', 'info');
+    
+    const pollInterval = setInterval(async () => {
+        attempts++;
+        
+        try {
+            const res = await apiRequest(`/api/payments/verify-payment/${reference}/`);
+            
+            if (!res.success) {
+                console.warn('Status check failed:', res.message);
+                if (attempts >= maxAttempts) {
+                    clearInterval(pollInterval);
+                    showToast('Payment status check timed out. Please refresh to see updates.', 'warning');
+                }
+                return;
+            }
+            
+            const paymentStatus = res.data.payment_status;
+            
+            // Update UI based on status
+            if (paymentStatus === 'completed') {
+                clearInterval(pollInterval);
+                showToast('Payment successful!', 'success');
+                await loadPaymentHistory();  // Refresh the table
+                updateDashboardStats();
+                populatePaymentsTable();  // Refresh payments page table
+                
+            } else if (paymentStatus === 'failed') {
+                clearInterval(pollInterval);
+                showToast('Payment failed or was declined.', 'error');
+                await loadPaymentHistory();
+                populatePaymentsTable();
+                
+            } else if (paymentStatus === 'pending' || paymentStatus === 'processing') {
+                // Still waiting, continue polling
+                if (attempts >= maxAttempts) {
+                    clearInterval(pollInterval);
+                    showToast('Payment is still processing. Check back later.', 'info');
+                }
+            }
+            
+        } catch (err) {
+            console.error('Polling error:', err);
+            if (attempts >= maxAttempts) {
+                clearInterval(pollInterval);
+                showToast('Could not verify payment status. Please refresh.', 'warning');
+            }
+        }
+    }, interval);
+}
+
+// ADD this helper to stop polling when modal closes:
+function stopPaymentPolling() {
+    if (AppState.paymentPollInterval) {
+        clearInterval(AppState.paymentPollInterval);
+        AppState.paymentPollInterval = null;
     }
 }
 

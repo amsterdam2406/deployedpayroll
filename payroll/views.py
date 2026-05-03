@@ -45,6 +45,8 @@ from payroll.throttles import AttendanceThrottle, PaymentThrottle, BulkPaymentTh
 from rest_framework.authentication import SessionAuthentication, BasicAuthentication
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.decorators import api_view, permission_classes
+import json
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -298,6 +300,76 @@ def _handle_charge_success(data):
         logger.error(f"Webhook charge.success: Payment not found for reference={reference}")
     except Exception as e:
         logger.error(f"Webhook _handle_charge_success error: {e}")
+        
+# ─────────────────────────────────────────
+# PAYMENT STATUS POLLING ENDPOINT
+# ─────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def verify_payment_status(request, reference):
+    """
+    Frontend polls this endpoint to check if a payment is completed/failed.
+    Also calls Paystack API as fallback if still processing.
+    """
+    try:
+        payment = Payment.objects.get(transaction_reference=reference)
+    except Payment.DoesNotExist:
+        return Response(
+            {'status': False, 'message': 'Payment not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # If still processing, double-check with Paystack API
+    if payment.status == 'processing':
+        paystack = PaystackAPI()
+        
+        # For bank transfers
+        if payment.payment_method == 'bank_transfer':
+            result = paystack.verify_transfer(reference)
+            transfer_data = result.get('data', {}) if isinstance(result.get('data'), dict) else {}
+            transfer_status = transfer_data.get('status', '')
+            
+            if result.get('status') is True and transfer_status == 'success':
+                with transaction.atomic():
+                    payment.status = 'completed'
+                    payment.paystack_reference = str(transfer_data.get('id', ''))
+                    payment.save()
+                    
+                    Deduction.objects.filter(
+                        employee=payment.employee, status='pending'
+                    ).update(status='applied')
+                    
+                    Notification.objects.create(
+                        user=payment.employee.user,
+                        message=f"Salary payment of ₦{payment.net_amount:,.2f} confirmed.",
+                        type='success'
+                    )
+            elif transfer_status in ['failed', 'reversed', 'cancelled']:
+                payment.status = 'failed'
+                payment.save()
+        else:
+            # Card payments
+            result = paystack.verify_transaction(reference)
+            paystack_status = (
+                result.get('data', {}).get('status')
+                if isinstance(result.get('data'), dict) else None
+            )
+            if result.get('status') is True and paystack_status == 'success':
+                payment.status = 'completed'
+                payment.save()
+            elif paystack_status in ['failed', 'abandoned']:
+                payment.status = 'failed'
+                payment.save()
+
+    return Response({
+        'status': True,
+        'payment_status': payment.status,  # 'pending' | 'processing' | 'completed' | 'failed'
+        'reference': reference,
+        'amount': float(payment.net_amount),
+        'employee_name': payment.employee.name if payment.employee else None,
+        'payment_date': payment.payment_date.isoformat() if payment.payment_date else None,
+    }, status=status.HTTP_200_OK)
 
 
 # ─────────────────────────────────────────
@@ -571,7 +643,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
 
     def get_throttles(self):
         if self.action in ['clock_in_with_photo', 'clock_out_with_photo',
-                           'clock_in', 'clock_out', 'create', 'update', 'partial_update']:
+                            'clock_in', 'clock_out', 'create', 'update', 'partial_update']:
             return [AttendanceThrottle()]
         return []
 
@@ -633,9 +705,34 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         attendance.clock_in_timestamp = timezone.now()
         attendance.clock_in = timezone.now().time()
         attendance.status = 'present'
+
+        attendance.clock_method = 'boxmark'  # Default boxmark for no-photo
         attendance.save()
-        logger.info(f"{request.user.username} clocked in without photo")
-        return Response({'message': 'Clocked in successfully', 'status': 'present'})
+        logger.info(f"{request.user.username} clocked in BOXMARK")
+        return Response({'message': 'Clocked in (boxmark) successfully', 'status': 'present'})
+    
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    def clock_out_boxmark(self, request):
+        try:
+            employee = self._get_employee(request)
+        except Employee.DoesNotExist:
+            return Response({'error': 'Employee profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            attendance = Attendance.objects.get(employee=employee, date=timezone.now().date())
+        except Attendance.DoesNotExist:
+            return Response({'error': 'No clock-in record found for today'}, status=status.HTTP_404_NOT_FOUND)
+
+        if attendance.clock_out_timestamp:
+            return Response({'error': 'Already clocked out today'}, status=status.HTTP_400_BAD_REQUEST)
+
+        attendance.clock_out_timestamp = timezone.now()
+        attendance.clock_out = timezone.now().time()
+        attendance.clock_method = 'boxmark'
+        attendance.save()
+        logger.info(f"{request.user.username} clocked out BOXMARK")
+        return Response({'message': 'Clocked out (boxmark) successfully'})
+
 
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
     def clock_in_with_photo(self, request):
@@ -1511,6 +1608,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
 # COMPANY VIEWSET
 # ─────────────────────────────────────────
 
+
 class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.all().order_by('id')
     serializer_class = CompanySerializer
@@ -1525,6 +1623,23 @@ class CompanyViewSet(viewsets.ModelViewSet):
                 assigned_guards__user=user
             ).distinct().order_by('id')
         return Company.objects.none()
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, CanViewAndEditCompany])
+    def renew_contract(self, request, pk=None):
+        company = self.get_object()
+        company.status = 'renewed'
+        company.contract_start = timezone.now().date()
+        company.contract_end = timezone.now().date() + timezone.timedelta(days=365)
+        company.save()
+        return Response({'message': 'Contract renewed', 'company': CompanySerializer(company).data})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, CanViewAndEditCompany])
+    def terminate_contract(self, request, pk=None):
+        company = self.get_object()
+        company.status = 'terminated'
+        company.save()
+        return Response({'message': 'Contract terminated', 'company': CompanySerializer(company).data})
+
 
 
 def frontend(request):

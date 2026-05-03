@@ -5,13 +5,16 @@ from django.http import JsonResponse
 from .views import (
     UserViewSet, EmployeeViewSet, AttendanceViewSet, DeductionViewSet,
     PaymentViewSet, CompanyViewSet, SackedEmployeeViewSet, 
-    NotificationViewSet, frontend,
-    paystack_banks, paystack_verify_account  # Import at top
+    NotificationViewSet, frontend, paystack_banks, 
+    paystack_verify_account, paystack_webhook, verify_payment_status
 )
 from .auth_views import (
     login_view, register_view, logout_view, CookieTokenRefreshView, 
-    verify_password, get_next_employee_id, CurrentUserView, change_password
+    verify_password, get_next_employee_id, CurrentUserView, change_password, self_register_employee
 )
+
+
+
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.conf import settings
 from django.conf.urls.static import static
@@ -45,7 +48,11 @@ urlpatterns = [
     
     # Auth endpoints
     path('api/login/', login_view, name='api-login'),
-    path('api/register/', register_view, name='api-register'),
+# path('api/register/', register_view, name='api-register'),
+# path('api/self-register/', self_register_employee, name='self-register'),
+
+
+
     path('api/logout/', logout_view, name='api-logout'),
     
     # JWT
@@ -61,8 +68,11 @@ urlpatterns = [
     path('api/change-password/', change_password, name='change-password'),
     
     # Paystack endpoints - ONLY THESE TWO (removed duplicates)
-    path('api/paystack/banks/', paystack_banks, name='paystack-banks'),
+    path('api/paystack/banks/', paystack_banks,  name='paystack-banks'),
     path('api/paystack/verify-account/', paystack_verify_account, name='paystack-verify'),
+    
+    path('api/payments/webhook/', paystack_webhook, name='paystack-webhook'),
+    path('api/payments/verify-payment/<str:reference>/', verify_payment_status, name='verify-payment-status'),
 ]
 
 # Static/Media in development

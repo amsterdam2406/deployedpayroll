@@ -37,6 +37,7 @@ class User(AbstractUser):
     is_employee_admin = models.BooleanField(default=False)
     is_payment_admin = models.BooleanField(default=False)
     is_deduction_admin = models.BooleanField(default=False)
+    is_password_admin = models.BooleanField(default=False)
     
     class Meta:
         db_table = 'users'
@@ -73,7 +74,7 @@ class Employee(models.Model):
     account_number = models.CharField(max_length=10)
     account_holder = models.CharField(max_length=200)
     
-    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active')
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='pending')
     join_date = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -163,11 +164,27 @@ class Attendance(models.Model):
     
     clock_out = models.TimeField(blank=True, null=True)
     clock_out_timestamp = models.DateTimeField(blank=True, null=True)
+
     clock_out_photo = models.ImageField(upload_to='attendance/clock_out/%Y/%m/', blank=True, null=True)
+    
+    CLOCK_METHOD_CHOICES = [
+        ('selfie', 'Selfie'),
+        ('boxmark', 'Boxmark'),
+    ]
+    
+    clock_method = models.CharField(
+        max_length=10, 
+        choices=CLOCK_METHOD_CHOICES, 
+        blank=True, null=True
+    )
+    
+    leave_start = models.DateField(blank=True, null=True)
+    leave_end = models.DateField(blank=True, null=True)
 # later max_lenght
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='present')
     
     # Track if attendance qualifies for deduction (commented out for future use)
+
     # is_eligible_for_deduction = models.BooleanField(default=False)
     # deduction_applied = models.BooleanField(default=False)
     # deduction_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0, null=True, blank=True)
@@ -276,8 +293,21 @@ class Company(models.Model):
     location = models.CharField(max_length=200)
     contact_number = models.CharField(max_length=15, blank=True, null=True)
     contact_email = models.EmailField(blank=True, null=True)
+
+    CONTRACT_STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+        ('terminated', 'Terminated'),
+        ('renewed', 'Renewed'),
+    ]
+    
+    contract_start = models.DateField(null=True, blank=True)
+    contract_end = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=15, choices=CONTRACT_STATUS_CHOICES, default='active')
+    
     guards_count = models.IntegerField(validators=[MinValueValidator(1)])
     payment_to_us = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+
     payment_per_guard = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     total_payment_to_guards = models.DecimalField(max_digits=10, decimal_places=2)
     profit = models.DecimalField(max_digits=10, decimal_places=2)

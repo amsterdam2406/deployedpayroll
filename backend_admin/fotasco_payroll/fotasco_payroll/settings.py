@@ -38,16 +38,12 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATIC_URL = '/static/'
 STATICFILES_DIRS = [
     BASE_DIR / "static",
-    # BASE_DIR / "templates",
-    # BASE_DIR.parent.parent / "front_admin",
 ]
 
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
 
@@ -56,7 +52,6 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 
 ALLOWED_HOSTS = ['fot-pyroll.onrender.com', 
                 'fotasco-payroll.onrender.com',
-                # 3LATER?? 'payroll.fotasco.com',
                 'localhost',
                 '127.0.0.1'
                 ]
@@ -215,16 +210,17 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
 }
+
 ##remove later testing only
-if 'test' in sys.argv:
-    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
-# JWT Settings
+# if 'test' in sys.argv:
+#     REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
+# # JWT Settings
 
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # FIX: Changed from 5 to 30 minutes
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),  # FIX: Changed from 5 to 30 min
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': True,  # FIX: Changed to True for better security
+    'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
@@ -232,10 +228,10 @@ SIMPLE_JWT = {
 
 # CORS Settings REMOVIN all LATER
 CORS_ALLOWED_ORIGINS = [
-    "https://localhost:3000",
-    "https://127.0.0.1:8000",
-    "https://127.0.0.1:3000",
-    "https://localhost:5173",
+    # "https://localhost:3000",
+    # "https://127.0.0.1:8000",
+    # "https://127.0.0.1:3000",
+    # "https://localhost:5173",
     "https://fot-pyroll.onrender.com",
 ]
 
@@ -248,6 +244,15 @@ PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
 PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
 
 PAYSTACK_CALLBACK_URL = config('PAYSTACK_CALLBACK_URL', default='')
+
+
+# Paystack Configuration
+# PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY', 'your_secret_key_here')
+# PAYSTACK_PUBLIC_KEY = os.environ.get('PAYSTACK_PUBLIC_KEY', 'your_public_key_here')
+
+# For webhook signature verification
+PAYSTACK_CALLBACK_HOST = os.environ.get('PAYSTACK_CALLBACK_HOST', 'https://fot-pyroll.onrnder.com')
+# PAYSTACK_CALLBACK_URL = f"https://{PAYSTACK_CALLBACK_HOST}/api/payments/verify_payment/"
 
 
 # Email Configuration (for payslip notifications)

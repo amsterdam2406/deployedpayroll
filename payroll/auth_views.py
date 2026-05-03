@@ -11,7 +11,9 @@ from django.db.utils import IntegrityError
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from .models import Employee
+from .models import Employee, User, Notification
+from .models import Notification
+
 from rest_framework_simplejwt.views import TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import InvalidToken
@@ -19,7 +21,6 @@ from rest_framework.views import APIView
 from .serializers import UserSerializer
 from .throttles import LoginThrottle
 import re
-from .models import Notification  
 
 
 logger = logging.getLogger(__name__)
@@ -357,6 +358,60 @@ def get_next_employee_id(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def self_register_employee(request):
+    """Self signup for staff/guards - active immediately"""
+    data = request.data
+    
+    required = ['username', 'password', 'full_name', 'role', 'email', 'location']
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return Response({'error': f'Missing: {", ".join(missing)}'}, status=400)
+    
+    role = data['role']
+    if role not in ['staff', 'guard']:
+        return Response({'error': 'Role must be staff/guard'}, status=400)
+    
+    if User.objects.filter(username=data['username']).exists():
+        return Response({'error': 'Username exists'}, status=400)
+    
+    try:
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=data['username'],
+                password=data['password'],
+                email=data['email'].lower(),
+                role=role,
+                first_name=data['full_name'].split()[0],
+                last_name=' '.join(data['full_name'].split()[1:]) or '',
+            )
+            
+            employee = Employee.objects.create(
+                user=user,
+                name=data['full_name'],
+                type=role,
+                location=data['location'],
+                salary=float(data.get('salary', 0)),
+                phone=data.get('phone', ''),
+                email=data['email'],
+                bank_name=data.get('bank_name', ''),
+                account_number=data.get('account_number', ''),
+                account_holder=data.get('account_holder', ''),
+                status='active',
+                join_date=timezone.now().date()
+            )
+            employee.refresh_from_db()
+            
+        logger.info(f"Self-reg {role}: {data['username']} ID:{employee.employee_id}")
+        return Response({
+            'message': 'Account created! Login: FSS-XXX-ID',
+            'employee_id': employee.employee_id,
+            'username': user.username
+        })
+    except Exception as e:
+        logger.error(f"Self-reg error: {e}")
+        return Response({'error': 'Failed'}, status=400)
+
+
 def change_password(request):
     """Change user password with confirmation and superuser notification"""
     user = request.user
@@ -398,3 +453,5 @@ def change_password(request):
     logger.info(f"Password changed for user {user.username} by {request.user.username}")
     
     return Response({'message': 'Password changed successfully'}, status=status.HTTP_200_OK)
+
+
