@@ -257,7 +257,7 @@ PASSWORD_RESET_TIMEOUT = 86400
 
 # CORS Settings REMOVIN all LATER
 CORS_ALLOWED_ORIGINS = [
-    config('FRONTEND_URL', default="https://fot-pyroll.onrender.com"),
+    "https://fot-pyroll.onrender.com",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
